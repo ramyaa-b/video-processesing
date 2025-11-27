@@ -1,22 +1,11 @@
 # app.py
-"""
-Streamlit app: Video -> Frames (NO transcription, no ffmpeg)
-Features:
-- Upload video files
-- Choose a saved video from dropdown
-- Extract frames (OpenCV) and preview a few frames
-- Download extracted frames as a zip
-Storage: .temp_streamlit/ in working directory
-"""
-
 from pathlib import Path
 import zipfile
 import shutil
 import io
-import tempfile
 
 import streamlit as st
-
+import cv2
 from PIL import Image
 
 BASE_DIR = Path.cwd() / ".temp_streamlit"
@@ -28,6 +17,12 @@ for d in (BASE_DIR, VIDEOS_DIR, FRAMES_DIR):
 
 st.set_page_config(page_title="Video → Frames (no ffmpeg)", layout="wide")
 st.title("📼 Video → Frames — *no transcription*")
+
+# Initialize session_state entry for selected video if missing
+if "selected_video" not in st.session_state:
+    st.session_state.selected_video = None
+if "last_saved_name" not in st.session_state:
+    st.session_state.last_saved_name = None
 
 # --- Helpers ---
 def save_uploaded_video(uploaded_file):
@@ -83,7 +78,6 @@ def make_zip_bytes(folder: Path, base_name: str = "frames"):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted(folder.iterdir()):
             if f.is_file():
-                # arcname: relative filename inside the zip
                 zf.write(f, arcname=f.name)
     buf.seek(0)
     return buf
@@ -93,24 +87,44 @@ st.sidebar.header("Upload / Manage")
 uploaded = st.sidebar.file_uploader("Upload a video (mp4, avi, mov, mkv...)", type=["mp4","mov","mkv","avi"], accept_multiple_files=False)
 if uploaded:
     saved = save_uploaded_video(uploaded)
+    st.session_state.last_saved_name = saved.name      # store actual saved filename
+    st.session_state.selected_video = saved.name       # auto-select it
     st.sidebar.success(f"Saved: {saved.name}")
 
+# Build the list AFTER potential save so it includes the new file
 saved_videos = ["-- pick one --"] + list_saved_videos()
-chosen = st.selectbox("Choose a saved video", options=saved_videos)
+
+# Use selectbox with a key bound to session_state.selected_video
+chosen = st.selectbox("Choose a saved video", options=saved_videos, index=0, key="selected_video")
+
+# If session_state was set to a file that exists, ensure selectbox shows it:
+# (Streamlit will handle this because key="selected_video" is bound)
 
 col1, col2 = st.columns([3,1])
 
 with col1:
     st.markdown("### Video preview / info")
-    if chosen and chosen != "-- pick one --":
-        video_path = VIDEOS_DIR / chosen
-        try:
-            st.video(str(video_path))
-        except Exception:
-            st.info("Streamlit can't preview this video; it may be too large or use an unsupported codec.")
-        st.write(f"**Path:** `{str(video_path)}`")
+    if st.session_state.selected_video and st.session_state.selected_video != "-- pick one --":
+        video_path = VIDEOS_DIR / st.session_state.selected_video
+        if video_path.exists():
+            try:
+                # reliably feed raw bytes to st.video
+                video_bytes = video_path.read_bytes()
+                st.video(video_bytes)
+            except Exception:
+                st.info("Streamlit can't preview this video; it may be too large or use an unsupported codec.")
+            st.write(f"**Path:** `{str(video_path)}`")
+        else:
+            st.error(f"Selected file not found on disk: {st.session_state.selected_video}")
+            # show what's actually on disk for debugging
+            st.write("Files on disk:")
+            for p in list_saved_videos():
+                st.write("-", p)
     else:
-        st.info("No video selected. Upload a video from the sidebar or select one from the dropdown.")
+        if st.session_state.last_saved_name:
+            st.info(f"Last saved file: `{st.session_state.last_saved_name}` — it should be selectable in the dropdown.")
+        else:
+            st.info("No video selected. Upload a video from the sidebar or select one from the dropdown.")
 
 with col2:
     st.markdown("### Actions")
@@ -123,13 +137,15 @@ if clear_btn:
         shutil.rmtree(BASE_DIR)
     for d in (BASE_DIR, VIDEOS_DIR, FRAMES_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    st.session_state.selected_video = None
+    st.session_state.last_saved_name = None
     st.experimental_rerun()
 
 if process_btn:
-    if not chosen or chosen == "-- pick one --":
+    if not st.session_state.selected_video or st.session_state.selected_video == "-- pick one --":
         st.warning("Choose a saved video first.")
     else:
-        video_path = VIDEOS_DIR / chosen
+        video_path = VIDEOS_DIR / st.session_state.selected_video
         out_folder = FRAMES_DIR / video_path.stem
         st.info(f"Extracting frames to `{out_folder}` (this may take a while for long videos)")
         try:
@@ -139,7 +155,6 @@ if process_btn:
                 st.markdown("#### Frame previews")
                 for i, img in enumerate(res["previews"]):
                     st.image(img, caption=f"Preview {i+1}", use_column_width=True)
-            # provide ZIP download
             if res["saved"] > 0:
                 zip_buf = make_zip_bytes(out_folder, base_name=video_path.stem + "_frames")
                 st.download_button(
@@ -153,5 +168,10 @@ if process_btn:
 
 st.markdown("---")
 with st.expander("Saved videos (debug)"):
-    for v in list_saved_videos():
-        st.write(v)
+    files = list_saved_videos()
+    if files:
+        for v in files:
+            st.write(v)
+    else:
+        st.write("No saved videos found")
+
