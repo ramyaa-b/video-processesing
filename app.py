@@ -5,7 +5,7 @@ import shutil
 import io
 
 import streamlit as st
-import cv2
+
 from PIL import Image
 
 BASE_DIR = Path.cwd() / ".temp_streamlit"
